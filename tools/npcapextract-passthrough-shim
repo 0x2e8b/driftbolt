@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Field-test stand-in for ntop's `npcapextract`, for exercising every part of
+# the recorder pipeline EXCEPT actual BPF/time extraction (which needs a real
+# ntop license and is assumed to work correctly since it's not our code).
+#
+# Unlike tools/npcapextract-tcpdump-shim (which really applies the BPF via
+# tcpdump), this shim is fully transparent: every call picks a random .pcap
+# file from anywhere under -t (recursively, matching n2disk's rolling/
+# <timestamp>/<timestamp>.pcap layout) and copies it verbatim to -o. The BPF
+# filter (-f) and time window (-b/-e) are accepted for CLI-contract
+# compatibility but completely ignored. Every call is a guaranteed SUCCESS
+# as long as at least one source pcap exists.
+#
+# CLI contract (SPEC.md section 3.2):
+#   npcapextract -t <TIMELINE_DIR> -b "<BEGIN>" -e "<END>" -f "<BPF>" -o <OUTPUT_FILE>
+
+set -euo pipefail
+
+timeline_dir=""
+begin=""
+end=""
+bpf=""
+out=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -t) timeline_dir="$2"; shift 2 ;;
+        -b) begin="$2"; shift 2 ;;
+        -e) end="$2"; shift 2 ;;
+        -f) bpf="$2"; shift 2 ;;
+        -o) out="$2"; shift 2 ;;
+        *) echo "npcapextract-passthrough-shim: unknown arg $1" >&2; exit 2 ;;
+    esac
+done
+
+for required in timeline_dir bpf out; do
+    if [[ -z "${!required}" ]]; then
+        echo "npcapextract-passthrough-shim: missing required option (-t/-f/-o)" >&2
+        exit 2
+    fi
+done
+
+if [[ ! -d "$timeline_dir" ]]; then
+    echo "npcapextract-passthrough-shim: timeline dir not found: $timeline_dir" >&2
+    exit 1
+fi
+
+source_pcap=$(find "$timeline_dir" -type f \( -name '*.pcap' -o -name '*.pcapng' \) | shuf -n1 2>/dev/null || true)
+if [[ -z "$source_pcap" ]]; then
+    echo "npcapextract-passthrough-shim: no .pcap/.pcapng file found under $timeline_dir" >&2
+    exit 1
+fi
+
+echo "npcapextract-passthrough-shim: PASSTHROUGH (BPF/time ignored) source=$source_pcap begin='$begin' end='$end' bpf='$bpf' -> $out" >&2
+
+cp "$source_pcap" "$out"

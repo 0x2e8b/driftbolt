@@ -1,0 +1,40 @@
+{
+	admin off
+}
+
+:{$SR_LISTEN_PORT:443} {
+	tls /certs/server.crt /certs/server.key
+
+	# Health probe: no auth.
+	handle /healthz {
+		reverse_proxy unix//run/api/api.sock
+	}
+
+	# Static PCAP downloads served directly by Caddy (auth + optional IP allowlist).
+	handle_path /{$SR_DOWNLOAD_PREFIX:downloads}/* {
+		@denied not remote_ip {$ALLOWED_IPS:0.0.0.0/0 ::/0}
+		respond @denied "Forbidden" 403
+
+		basic_auth {
+			{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+		}
+		root * /srv/alerts
+		file_server {
+			browse off
+		}
+	}
+
+	# Everything else (POST /extract, GET /) -> API over unix socket, behind auth.
+	handle {
+		# Authoritative body size cap: enforced regardless of a lying/absent
+		# Content-Length header. Must match the app's MAX_BODY_BYTES (2 MiB
+		# exactly = 2*1024*1024 bytes); use MiB not MB (MB = 2,000,000 bytes).
+		request_body {
+			max_size 2MiB
+		}
+		basic_auth {
+			{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
+		}
+		reverse_proxy unix//run/api/api.sock
+	}
+}

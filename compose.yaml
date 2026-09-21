@@ -1,0 +1,65 @@
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    environment:
+      SR_PUBLIC_HOST: ${SR_PUBLIC_HOST:?set SR_PUBLIC_HOST}
+      SR_DOWNLOAD_PREFIX: ${SR_DOWNLOAD_PREFIX:-downloads}
+      SR_TIMELINE_DIR: /storage/pcaps/rolling
+      SR_OUTPUT_DIR: /storage/pcaps/alerts
+      SR_MAX_CONCURRENT_EXTRACTIONS: ${SR_MAX_CONCURRENT_EXTRACTIONS:-1}
+      SR_EXTRACT_TIMEOUT_SECONDS: ${SR_EXTRACT_TIMEOUT_SECONDS:-300}
+      SR_RETENTION_MAX_AGE_DAYS: ${SR_RETENTION_MAX_AGE_DAYS:-7}
+      SR_RETENTION_MAX_TOTAL_BYTES: ${SR_RETENTION_MAX_TOTAL_BYTES:-0}
+      SR_LOG_FORMAT: ${SR_LOG_FORMAT:-text}
+    volumes:
+      - rolling:/storage/pcaps/rolling:ro
+      - alerts:/storage/pcaps/alerts
+      - run:/run/api
+    # Healthcheck runs inside the container against the unix socket.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect('/run/api/api.sock'); s.sendall(b'GET /healthz HTTP/1.0\\r\\n\\r\\n'); sys.exit(0 if b'200' in s.recv(1024) else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "443:443"
+      - "80:80"
+    environment:
+      SR_PUBLIC_HOST: ${SR_PUBLIC_HOST:?set SR_PUBLIC_HOST}
+      SR_DOWNLOAD_PREFIX: ${SR_DOWNLOAD_PREFIX:-downloads}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?set BASIC_AUTH_USER}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?set BASIC_AUTH_HASH}
+      ALLOWED_IPS: ${ALLOWED_IPS:-0.0.0.0/0 ::/0}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - alerts:/srv/alerts:ro
+      - run:/run/api:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # Future recorder (n2disk). Attaches to the rolling volume; needs capture
+  # privileges (host network / NET_RAW / --privileged). Templates in
+  # docs/reference/. Uncomment and complete when integrating the recorder.
+  # recorder:
+  #   image: <n2disk-image>
+  #   restart: unless-stopped
+  #   network_mode: host
+  #   cap_add: ["NET_RAW", "NET_ADMIN"]
+  #   volumes:
+  #     - rolling:/storage/pcaps/rolling
+
+volumes:
+  rolling:
+  alerts:
+  run:
+  caddy_data:
+  caddy_config:

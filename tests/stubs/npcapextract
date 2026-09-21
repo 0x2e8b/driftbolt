@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""Fake npcapextract for tests. Behavior controlled by STUB_MODE env var.
+
+Modes: success (default) | miss | fail | timeout.
+Parses -t -b -e -f -o and writes the -o file per mode.
+"""
+import os
+import sys
+import time
+
+args = sys.argv[1:]
+opts = {}
+it = iter(args)
+for a in it:
+    if a in ("-t", "-b", "-e", "-f", "-o"):
+        opts[a] = next(it, None)
+
+# Assert the invocation shape the app must produce.
+for required in ("-t", "-b", "-e", "-f", "-o"):
+    if opts.get(required) is None:
+        sys.stderr.write(f"missing {required}\n")
+        sys.exit(2)
+
+mode = os.environ.get("STUB_MODE", "success")
+out = opts["-o"]
+
+if mode == "timeout":
+    time.sleep(3600)
+elif mode == "fail":
+    sys.stderr.write("simulated failure\n")
+    sys.exit(1)
+elif mode == "miss":
+    open(out, "wb").close()  # zero-byte file, rc 0
+    sys.exit(0)
+else:  # success
+    with open(out, "wb") as fh:
+        fh.write(b"PCAPDATA")
+    sys.exit(0)

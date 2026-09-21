@@ -1,0 +1,16 @@
+{
+    "host": "192.168.0.109",
+    "listen_port": 8888,
+    "fileserver_port": 8081,
+    "timeline_dir": "/storage/pcaps/rolling",
+    "output_dir": "/storage/pcaps/alerts",
+    "default_filter": "full",
+    "default_before": 360,
+    "default_after": 360,
+    "max_concurrent_extractions": 1,
+    "listener_auth_user": "",
+    "listener_auth_pass": "",
+    "fileserver_auth_user": "",
+    "fileserver_auth_pass": "",
+    "allowed_ips": []
+}

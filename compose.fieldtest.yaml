@@ -1,0 +1,54 @@
+services:
+  api:
+    build: .
+    restart: unless-stopped
+    environment:
+      SR_PUBLIC_HOST: ${SR_PUBLIC_HOST:?set SR_PUBLIC_HOST}
+      SR_DOWNLOAD_PREFIX: ${SR_DOWNLOAD_PREFIX:-downloads}
+      SR_TIMELINE_DIR: /storage/pcaps/rolling
+      SR_OUTPUT_DIR: /storage/pcaps/alerts
+      SR_NPCAPEXTRACT_PATH: /opt/shim/npcapextract-passthrough-shim
+      SR_MAX_CONCURRENT_EXTRACTIONS: ${SR_MAX_CONCURRENT_EXTRACTIONS:-2}
+      SR_EXTRACT_TIMEOUT_SECONDS: ${SR_EXTRACT_TIMEOUT_SECONDS:-300}
+      SR_RETENTION_MAX_AGE_DAYS: ${SR_RETENTION_MAX_AGE_DAYS:-7}
+      SR_RETENTION_MAX_TOTAL_BYTES: ${SR_RETENTION_MAX_TOTAL_BYTES:-0}
+      SR_LOG_FORMAT: ${SR_LOG_FORMAT:-text}
+    volumes:
+      - /storage/pcaps/rolling:/storage/pcaps/rolling:ro
+      - /storage/pcaps/alerts:/storage/pcaps/alerts
+      - run:/run/api
+      - ./tools/npcapextract-passthrough-shim:/opt/shim/npcapextract-passthrough-shim:ro
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect('/run/api/api.sock'); s.sendall(b'GET /healthz HTTP/1.0\\r\\n\\r\\n'); sys.exit(0 if b'200' in s.recv(1024) else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "8443:8443"
+      - "8080:80"
+    environment:
+      SR_LISTEN_PORT: ${SR_LISTEN_PORT:-8443}
+      SR_DOWNLOAD_PREFIX: ${SR_DOWNLOAD_PREFIX:-downloads}
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?set BASIC_AUTH_USER}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?set BASIC_AUTH_HASH}
+      ALLOWED_IPS: ${ALLOWED_IPS:-0.0.0.0/0 ::/0}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/certs:/certs:ro
+      - /storage/pcaps/alerts:/srv/alerts:ro
+      - run:/run/api:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  run:
+  caddy_data:
+  caddy_config:

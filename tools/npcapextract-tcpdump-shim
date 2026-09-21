@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Drop-in stand-in for ntop's `npcapextract` binary, for field-testing the
+# recorder pipeline (webhook -> BPF -> extraction -> download) without an
+# ntop license. Implements the exact CLI contract from SPEC.md section 3.2:
+#
+#   npcapextract -t <TIMELINE_DIR> -b "<BEGIN>" -e "<END>" -f "<BPF>" -o <OUTPUT_FILE>
+#
+# Real npcapextract reads n2disk's indexed rolling timeline and slices by
+# BOTH time window and BPF. This shim has no timeline index to slice by
+# time, so -t is expected to be a directory containing exactly one .pcap
+# (or .pcapng) file used as the source, -b/-e are accepted but ignored, and
+# only the BPF filter (-f) is actually applied via `tcpdump -r ... -w ...`.
+# Good enough to validate the system end-to-end on canned traffic; not a
+# substitute for testing real time-window slicing.
+#
+# Usage: point SR_NPCAPEXTRACT_PATH (or npcapextract_path in old-style
+# config) at this script's absolute path, and put one source .pcap in the
+# directory you configure as timeline_dir/SR_TIMELINE_DIR.
+
+set -euo pipefail
+
+timeline_dir=""
+begin=""
+end=""
+bpf=""
+out=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -t) timeline_dir="$2"; shift 2 ;;
+        -b) begin="$2"; shift 2 ;;
+        -e) end="$2"; shift 2 ;;
+        -f) bpf="$2"; shift 2 ;;
+        -o) out="$2"; shift 2 ;;
+        *) echo "npcapextract-tcpdump-shim: unknown arg $1" >&2; exit 2 ;;
+    esac
+done
+
+for required in timeline_dir bpf out; do
+    if [[ -z "${!required}" ]]; then
+        echo "npcapextract-tcpdump-shim: missing required option (-t/-f/-o)" >&2
+        exit 2
+    fi
+done
+
+if [[ ! -d "$timeline_dir" ]]; then
+    echo "npcapextract-tcpdump-shim: timeline dir not found: $timeline_dir" >&2
+    exit 1
+fi
+
+source_pcap=$(find "$timeline_dir" -maxdepth 1 -type f \( -name '*.pcap' -o -name '*.pcapng' \) | head -n1)
+if [[ -z "$source_pcap" ]]; then
+    echo "npcapextract-tcpdump-shim: no .pcap/.pcapng file found in $timeline_dir" >&2
+    exit 1
+fi
+
+echo "npcapextract-tcpdump-shim: source=$source_pcap begin='$begin' end='$end' (time window ignored, no timeline index) bpf='$bpf'" >&2
+
+tcpdump -r "$source_pcap" -w "$out" "$bpf" 2>&1
+rc=$?
+
+if [[ $rc -ne 0 ]]; then
+    : > "$out"
+    exit "$rc"
+fi
+
+# `tcpdump -w` always writes a 24-byte pcap file header even with zero
+# matching packets, unlike real npcapextract which leaves a true zero-byte
+# file on a MISS. Detect "header only, no packets" and truncate to match
+# the real contract (extraction.py's success check is `size > 0`).
+packet_count=$(tcpdump -r "$out" 2>/dev/null | wc -l | tr -d ' ')
+if [[ "$packet_count" -eq 0 ]]; then
+    : > "$out"
+fi
+exit 0

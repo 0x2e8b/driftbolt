@@ -1,0 +1,15 @@
+[Unit]
+Description=n2disk packet recorder
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/n2disk /etc/n2disk/n2disk.conf
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
