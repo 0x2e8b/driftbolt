@@ -99,10 +99,70 @@ unset _confirm_pw
 ok "credential captured for user '${CLIENT_BASIC_AUTH_USER}' (used in steps 1 and 4 below)"
 
 # ===========================================================================
-log "Step 0/7: pre-flight checks"
+log "Step 0/7: pre-flight checks (auto-installs Docker if missing)"
 # ===========================================================================
-command -v docker >/dev/null 2>&1 || die "docker not found on PATH"
-docker compose version >/dev/null 2>&1 || die "docker compose plugin not found"
+# Only Docker itself gets auto-installed. n2disk/npcapextract are ntop's
+# licensed commercial packages - there is no way to install those without
+# the client's own ntop license/repo credentials, so a missing rolling/
+# dir or missing npcapextract binary still just fails/warns below instead
+# of trying to fetch anything.
+if ! command -v docker >/dev/null 2>&1; then
+    warn "docker not found - installing via get.docker.com"
+    curl -fsSL https://get.docker.com | sh || die "docker install script failed"
+    systemctl enable --now docker
+    command -v docker >/dev/null 2>&1 || die "docker still not on PATH after install"
+    ok "docker installed"
+else
+    ok "docker already present ($(docker --version))"
+fi
+
+if ! docker compose version >/dev/null 2>&1; then
+    # This branch only fires when Docker itself came from somewhere other
+    # than get.docker.com (e.g. distro-packaged docker.io on Debian/Ubuntu),
+    # since get.docker.com above already pulls docker-compose-plugin from
+    # Docker's own repo. Debian/Ubuntu's OWN apt repos do not carry
+    # docker-compose-plugin at all, so apt-get install would just 404 -
+    # add Docker's official repo first, the same one get.docker.com uses.
+    warn "docker compose plugin not found - installing docker-compose-plugin"
+    if command -v apt-get >/dev/null 2>&1; then
+        . /etc/os-release
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL "https://download.docker.com/linux/${ID}/gpg" -o /etc/apt/keyrings/docker.asc
+        chmod a+r /etc/apt/keyrings/docker.asc
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${ID} ${VERSION_CODENAME} stable" \
+            > /etc/apt/sources.list.d/docker.list
+        apt-get update -qq
+        apt-get install -y -qq docker-compose-plugin
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y -q docker-compose-plugin
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y -q docker-compose-plugin
+    else
+        die "no known package manager (apt-get/dnf/yum) to install docker-compose-plugin - install it manually and re-run"
+    fi
+    docker compose version >/dev/null 2>&1 || die "docker compose plugin still missing after install"
+    ok "docker compose plugin installed"
+else
+    ok "docker compose already present ($(docker compose version --short 2>/dev/null))"
+fi
+
+if ! systemctl is-active --quiet docker; then
+    log "starting docker service"
+    systemctl enable --now docker
+fi
+
+# The migration itself runs as root (see the EUID check above), so group
+# membership doesn't gate this script's own `docker` calls - this is only
+# for whoever hands off day-2 operation of this host afterwards, so a
+# non-root operator can run `docker compose logs` etc. without sudo.
+HANDOFF_USER="${SUDO_USER:-}"
+if [[ -n "$HANDOFF_USER" ]] && id "$HANDOFF_USER" >/dev/null 2>&1; then
+    if ! id -nG "$HANDOFF_USER" | grep -qw docker; then
+        usermod -aG docker "$HANDOFF_USER"
+        warn "added '$HANDOFF_USER' to the docker group - they must log out/in (or run 'newgrp docker') for it to take effect"
+    fi
+fi
+
 command -v npcapextract >/dev/null 2>&1 || warn "npcapextract not on PATH as root - v2 will need SR_NPCAPEXTRACT_PATH pointed at it explicitly, see step 4"
 [[ -d "$ROLLING_DIR" ]] || die "$ROLLING_DIR does not exist - is n2disk even installed on this host?"
 ok "docker + compose present, $ROLLING_DIR exists"
