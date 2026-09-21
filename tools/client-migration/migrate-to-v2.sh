@@ -71,10 +71,29 @@ for arg in "$@"; do
     esac
 done
 
-log()  { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m  OK\033[0m  %s\n' "$*"; }
 warn() { printf '\033[1;33m  ! \033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m FAIL\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Every step here checks current state before acting (see the "safe to
+# re-run" note in the header), so a Ctrl+C or unhandled failure never
+# leaves things worse than a normal re-run can fix - but the bare "script
+# exited" a plain `set -e` gives on its own says nothing about where it
+# stopped or what to do next. This prints that context on ANY non-zero
+# exit (real failure or Ctrl+C alike).
+_last_step=""
+log() { _last_step="$*"; printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
+on_exit() {
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        printf '\n\033[1;31m!!\033[0m interrupted or failed during: %s\n' "${_last_step:-startup}" >&2
+        echo "   re-run this script - every step checks current state first, so it picks up where it left off" >&2
+        if [[ -n "${DEPLOY_DIR:-}" ]] && [[ -f "$DEPLOY_DIR/compose.yaml" ]]; then
+            echo "   check partial deploy state with: docker compose -f $DEPLOY_DIR/compose.yaml -f $DEPLOY_DIR/compose.override.yaml ps" >&2
+        fi
+    fi
+}
+trap on_exit EXIT
 
 if [[ $EUID -ne 0 ]]; then
     die "run as root (needs systemctl, docker, and /storage access)"
@@ -528,20 +547,27 @@ if [[ -z "$BASIC_AUTH_PLAINTEXT" ]]; then
     warn "no password available to curl the API with - export BASIC_AUTH_PLAINTEXT before running. Falling back to a curl command you can run by hand:"
     echo
     echo "  curl -k -u \"\$BASIC_AUTH_USER:<plaintext-password>\" -X POST \\"
-    echo "    \"https://${SR_PUBLIC_HOST}/extract?filter=full&before=30&after=30\" \\"
+    echo "    \"https://${SR_PUBLIC_HOST}/extract?filter=client&before=30&after=30\" \\"
     echo "    -H 'Content-Type: application/json' \\"
-    echo "    -d '{\"id\":\"migration-smoke-test\",\"clientIp\":\"10.0.0.10\",\"serverIp\":\"10.0.0.20\",\"serverPort\":443,\"protocolName\":\"tcp\",\"unixTimestamp\":'\"\$(date +%s)\"'}'"
+    echo "    -d '{\"id\":\"migration-smoke-test\",\"clientIp\":\"150.254.1.158\",\"protocolName\":\"tcp\",\"unixTimestamp\":'\"\$(date +%s)\"'}'"
     echo
     log "migration steps 0-6 done; run the curl above manually, or export BASIC_AUTH_PLAINTEXT and re-run with the same flags to finish step 7 automatically."
     exit 0
 fi
 
+# bpf.py always requires at least one host/port term - there is no
+# time-window-only filter mode, so a MISS here is expected and fine (it
+# only proves the pipeline runs end-to-end, not that any real traffic
+# exists at this address). Uses mode=client with 150.254.1.158, a known
+# address from this client's own traffic (seen in the 2026-09-21
+# diagnostic session) rather than any address from Sycope's own
+# environment - real host, but not necessarily present in THIS 60s window.
 now_ts=$(date +%s)
-log "sending a real test alert with unixTimestamp=$now_ts (just now) against a currently-recording window"
+log "sending a test alert with unixTimestamp=$now_ts (just now) against a currently-recording window"
 response="$(curl -sk -u "${BASIC_AUTH_USER}:${BASIC_AUTH_PLAINTEXT}" -X POST \
-    "https://${SR_PUBLIC_HOST}/extract?filter=full&before=30&after=30" \
+    "https://${SR_PUBLIC_HOST}/extract?filter=client&before=30&after=30" \
     -H 'Content-Type: application/json' \
-    -d "{\"id\":\"migration-smoke-test\",\"clientIp\":\"10.0.0.10\",\"serverIp\":\"10.0.0.20\",\"serverPort\":443,\"protocolName\":\"tcp\",\"unixTimestamp\":${now_ts}}")"
+    -d "{\"id\":\"migration-smoke-test\",\"clientIp\":\"150.254.1.158\",\"protocolName\":\"tcp\",\"unixTimestamp\":${now_ts}}")"
 
 echo "response: $response"
 
@@ -560,7 +586,7 @@ case "$response" in
         die "got NO BPF FILTER - the test payload's fields didn't survive parsing, check api logs"
         ;;
     "ERROR: npcapextract failed")
-        warn "got ERROR: npcapextract failed - could be a real failure OR just a MISS (0 packets matched). Two known benign causes given the ${BUFFER_WARMUP_SECONDS}s warm-up wait used here: (1) the test IPs (10.0.0.10/10.0.0.20) don't appear in real traffic in this window, or (2) n2disk hasn't closed a single 300s chunk yet so there's nothing indexed to search. Check docker compose logs api for 'MISS' (benign) vs a real subprocess stderr (not benign) before treating this as a blocker. If it's (2), wait until n2disk uptime clears 300s+ and re-run: ./migrate-to-v2.sh --skip-cleanup"
+        warn "got ERROR: npcapextract failed - could be a real failure OR just a MISS (0 packets matched). Two known benign causes given the ${BUFFER_WARMUP_SECONDS}s warm-up wait used here: (1) 150.254.1.158 simply isn't talking to this host in the current 60s window (it's a real address seen in this client's traffic historically, not a guarantee it's active right now), or (2) n2disk hasn't closed a single 300s chunk yet so there's nothing indexed to search. Check docker compose logs api for 'MISS' (benign) vs a real subprocess stderr (not benign) before treating this as a blocker. If it's (2), wait until n2disk uptime clears 300s+ and re-run: ./migrate-to-v2.sh --skip-cleanup"
         docker compose logs api --tail 30
         ;;
     "ERROR: npcapextract timeout")
