@@ -133,6 +133,36 @@ if grep -q 'server.crt or server.key missing' <<<"$FIRST_RUN"; then
 fi
 
 # ---------------------------------------------------------------------------
+# Fix 3b: npcapextract stuck past its own timeout
+# With SR_MAX_CONCURRENT_EXTRACTIONS=1 (default) a single stuck process
+# silently blocks every extraction behind it, with no visible error on
+# the Caddy/auth side - this is what we suspect caused webhooks to go
+# quiet after 10:14 on 2026-09-22 without hard proof at the time.
+if grep -q 'npcapextract process stuck past its own timeout' <<<"$FIRST_RUN"; then
+    log "fixing: killing stuck npcapextract process(es)"
+    stuck_pids="$($COMPOSE exec -T api ps -eo pid,comm 2>/dev/null | grep npcapextract | grep -v grep | awk '{print $1}')"
+    if [[ -z "$stuck_pids" ]]; then
+        warn "verify.sh reported a stuck process but none found now - it may have exited on its own, or the container restarted since"
+    else
+        for pid in $stuck_pids; do
+            $COMPOSE exec -T api kill -9 "$pid" 2>/dev/null
+        done
+        sleep 2
+        still_there="$($COMPOSE exec -T api ps -eo pid,comm 2>/dev/null | grep npcapextract | grep -v grep)"
+        if [[ -z "$still_there" ]]; then
+            ok "killed stuck npcapextract process(es): $stuck_pids"
+            FIXED=1
+        else
+            warn "SIGKILL did not clear the process - it is likely stuck in uninterruptible D-state (blocked on a stalled mount/disk I/O). Restarting the api container instead."
+            $COMPOSE restart api
+            sleep 3
+            ok "restarted api container to clear the stuck process"
+            FIXED=1
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Fix 4: n2disk not active
 if grep -q 'n2disk.service is NOT active' <<<"$FIRST_RUN"; then
     log "fixing: starting n2disk.service"

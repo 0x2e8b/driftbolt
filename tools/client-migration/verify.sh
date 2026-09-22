@@ -164,6 +164,40 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+sec "6b. stuck npcapextract processes"
+# extraction.py calls npcapextract via subprocess.run(timeout=...) - that
+# timeout should always kill a hung process, but a process stuck in
+# uninterruptible D-state (e.g. blocked on a stalled/unreadable mount)
+# cannot be killed by SIGTERM/SIGKILL until the kernel unblocks it. With
+# SR_MAX_CONCURRENT_EXTRACTIONS=1 (the default), a single stuck process
+# silently blocks every subsequent extraction with no visible error on
+# the Caddy/auth side - webhooks keep arriving (confirmed via tcpdump) but
+# the api never responds in time, which is exactly what a client sees as
+# a dead/timed-out destination. This is what we suspected caused webhooks
+# to go quiet after 10:14 on 2026-09-22 without ever finding hard proof.
+SR_EXTRACT_TIMEOUT_SECONDS="$(grep -E '^SR_EXTRACT_TIMEOUT_SECONDS=' "$DEPLOY_DIR/.env" 2>/dev/null | cut -d= -f2-)"
+SR_EXTRACT_TIMEOUT_SECONDS="${SR_EXTRACT_TIMEOUT_SECONDS:-300}"
+npcap_procs="$($COMPOSE exec -T api ps -eo pid,etimes,stat,comm 2>/dev/null | grep npcapextract | grep -v grep)"
+if [[ -z "$npcap_procs" ]]; then
+    ok "no npcapextract process currently running inside api container"
+else
+    echo "$npcap_procs" | while read -r pid etimes stat comm; do
+        [[ -z "$pid" ]] && continue
+        if (( etimes > SR_EXTRACT_TIMEOUT_SECONDS )); then
+            echo "  FAIL  pid $pid ($comm) has run for ${etimes}s, past the ${SR_EXTRACT_TIMEOUT_SECONDS}s timeout - stuck, likely in state '$stat'"
+        else
+            echo "  WARN  pid $pid ($comm) running for ${etimes}s (under the ${SR_EXTRACT_TIMEOUT_SECONDS}s timeout, may be legitimate)"
+        fi
+    done
+    max_etimes="$(echo "$npcap_procs" | awk '{print $2}' | sort -rn | head -1)"
+    if [[ -n "$max_etimes" ]] && (( max_etimes > SR_EXTRACT_TIMEOUT_SECONDS )); then
+        bad "npcapextract process stuck past its own timeout (${max_etimes}s > ${SR_EXTRACT_TIMEOUT_SECONDS}s) - with SR_MAX_CONCURRENT_EXTRACTIONS=1 this blocks every extraction behind it"
+    else
+        warn "npcapextract process(es) running but still within timeout - not necessarily a problem, re-check in a minute"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 sec "7. rolling/ directory permissions from inside the container"
 if $COMPOSE exec -T api ls "$ROLLING_DIR" >/dev/null 2>&1; then
     ok "api container can list $ROLLING_DIR"
