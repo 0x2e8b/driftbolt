@@ -106,6 +106,13 @@ def run_extraction(
         "-e", end,
         "-f", bpf,
         "-o", output_path,
+        # npcapextract drops privileges to "nobody" before opening the
+        # output file by default. The api container runs as root, so
+        # without this it gets a silent Permission denied writing to
+        # output_dir unless that directory is world-writable - stay as
+        # root instead of dropping to a user the container's own
+        # filesystem permissions were never set up for.
+        "-u", "root",
     ]
 
     try:
