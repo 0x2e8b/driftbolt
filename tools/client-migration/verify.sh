@@ -101,6 +101,51 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+sec "3b. alerts/ volume consistency between api and caddy"
+# Root cause found on 2026-09-22: the base compose.yaml mounts a Docker
+# NAMED VOLUME called "alerts" into both api (/storage/pcaps/alerts) and
+# caddy (/srv/alerts:ro) - the same volume, so both containers see the
+# same files by design. But compose.override.yaml's api section bind-
+# mounts the HOST path /storage/pcaps/alerts over that same container
+# path, which makes api write straight to the host filesystem instead of
+# into the named volume. Caddy is never given the equivalent override, so
+# it keeps reading the original (empty) named volume - it can never see
+# any file api produces. api's own SUCCESS log with a real file size is
+# not proof the download link works; only Caddy's own view of the
+# directory is. A downloaded pcap returning 404 despite the file
+# existing on the host almost certainly means this.
+API_ALERTS_MOUNT="$(grep -B10 '^  caddy:' "$DEPLOY_DIR/compose.override.yaml" 2>/dev/null | grep -oE '/storage/pcaps/alerts:[^[:space:]]*' | head -1)"
+CADDY_ALERTS_MOUNT="$(grep -A10 '^  caddy:' "$DEPLOY_DIR/compose.override.yaml" 2>/dev/null | grep -oE '/storage/pcaps/alerts:/srv/alerts[^[:space:]]*' | head -1)"
+if [[ -n "$API_ALERTS_MOUNT" ]]; then
+    # api has a host bind-mount override for alerts/ - caddy MUST have a
+    # matching one, or it's reading a different, empty named volume.
+    if [[ -n "$CADDY_ALERTS_MOUNT" ]]; then
+        ok "both api and caddy bind-mount the same host path for alerts/ - downloads will match what api writes"
+    else
+        bad "api overrides alerts/ to a host bind-mount ($API_ALERTS_MOUNT) but caddy does NOT - caddy is still reading the original (likely empty) named volume and will 404 on every real file api produces. Add '- /storage/pcaps/alerts:/srv/alerts:ro' under the caddy service's volumes in compose.override.yaml."
+    fi
+else
+    # Neither container has an override - both use the same named volume
+    # from base compose.yaml, which is internally consistent (just not
+    # a real host path you can inspect directly).
+    ok "no alerts/ bind-mount override present - both containers share the same Docker named volume from compose.yaml (internally consistent)"
+fi
+
+# Belt-and-suspenders: actually compare what each container sees on disk,
+# regardless of what the yaml says should be true.
+if $COMPOSE ps --format '{{.Name}}' 2>/dev/null | grep -q caddy; then
+    api_listing="$($COMPOSE exec -T api ls /storage/pcaps/alerts 2>/dev/null | sort)"
+    caddy_listing="$($COMPOSE exec -T caddy ls /srv/alerts 2>/dev/null | sort)"
+    if [[ -z "$api_listing" && -z "$caddy_listing" ]]; then
+        warn "both api's /storage/pcaps/alerts and caddy's /srv/alerts are empty right now - can't confirm they match until at least one file exists"
+    elif [[ "$api_listing" == "$caddy_listing" ]]; then
+        ok "api and caddy see identical file listings in their respective alerts directories"
+    else
+        bad "api's /storage/pcaps/alerts and caddy's /srv/alerts have DIFFERENT contents right now - they are not the same underlying storage. Downloads will 404 for files api just wrote."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 sec "4. timezone consistency (host vs api container)"
 HOST_TZ="$(timedatectl show -p Timezone --value 2>/dev/null || echo unknown)"
 HOST_EPOCH="$(date +%s)"
@@ -118,6 +163,40 @@ if [[ -n "$CONTAINER_EPOCH" ]]; then
     fi
 else
     bad "could not read clock from api container - is it running?"
+fi
+
+# ---------------------------------------------------------------------------
+sec "4b. capture interface link state"
+# Confirmed root cause on 2026-09-22: n2disk logs a perfectly healthy
+# startup (PF_RING attached, "packet capture started") and systemd shows
+# it active, but the capture NIC itself had NO-CARRIER - a dead physical
+# link (unplugged cable/SFP, or the far-end SPAN/TAP port down). n2disk
+# has nothing to read from the wire and writes zero files, with no error
+# that looks like a link problem anywhere in its own logs. This check
+# would have caught it in seconds instead of a 30-minute chase through
+# licensing logs, RX counters, and file timestamps.
+# Read it straight from the running process's own command line - the
+# only source that can't be stale or wrong, since it's what n2disk is
+# actually using right now (config file conventions vary by install).
+CAPTURE_IFACE="$(ps -eo args 2>/dev/null | grep '[n]2disk' | grep -oE '\-i\s+\S+' | awk '{print $2}' | head -1)"
+if [[ -z "$CAPTURE_IFACE" ]]; then
+    warn "could not auto-detect the capture interface name - pass it manually: ip -s link show <iface>"
+else
+    link_info="$(ip -s link show "$CAPTURE_IFACE" 2>&1)"
+    if [[ -z "$link_info" ]]; then
+        bad "interface $CAPTURE_IFACE not found - check the name is still correct"
+    elif grep -q 'NO-CARRIER' <<<"$link_info"; then
+        bad "$CAPTURE_IFACE has NO-CARRIER - dead physical link (cable/SFP unplugged, or the far-end SPAN/TAP port is down). n2disk will start cleanly and log nothing wrong, but capture zero packets. This is a physical-layer problem, not fixable from this host."
+    else
+        rx1="$(grep -A1 'RX:' <<<"$link_info" | tail -1 | awk '{print $2}')"
+        sleep 2
+        rx2="$(ip -s link show "$CAPTURE_IFACE" 2>/dev/null | grep -A1 'RX:' | tail -1 | awk '{print $2}')"
+        if [[ -n "$rx1" && -n "$rx2" && "$rx2" -gt "$rx1" ]]; then
+            ok "$CAPTURE_IFACE has carrier and RX bytes are increasing ($rx1 -> $rx2 over 2s) - live traffic confirmed"
+        else
+            warn "$CAPTURE_IFACE has carrier but RX bytes did not increase in 2s ($rx1 -> $rx2) - link is up but idle right now, or the counters are stale. Check again over a longer window before ruling out a traffic problem."
+        fi
+    fi
 fi
 
 # ---------------------------------------------------------------------------
