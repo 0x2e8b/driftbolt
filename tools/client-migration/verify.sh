@@ -68,11 +68,16 @@ else
 fi
 # Cross-check what compose actually resolves it to at runtime (this is the
 # only way to know for sure - compose does its own interpolation pass).
-resolved_hash="$($COMPOSE config 2>/dev/null | grep -A2 'BASIC_AUTH_HASH' | grep -oE '\$2[aby]\$[0-9]+\$[A-Za-z0-9./]+' | head -1)"
+# `docker compose config` prints values AS WRITTEN in .env, i.e. still
+# $$-escaped ($$2a$$14$$...) - it does not collapse $$ back to $ in its
+# own output, even though that collapse does happen for real when the
+# container actually starts. So the pattern here must match the escaped
+# form, not a real bcrypt hash's single-$ form.
+resolved_hash="$($COMPOSE config 2>/dev/null | grep -A2 'BASIC_AUTH_HASH' | grep -oE '\${2}2[aby]\${2}[0-9]+\${2}[A-Za-z0-9./]+' | head -1)"
 if [[ -n "$resolved_hash" ]]; then
-    ok "compose resolves a real-looking bcrypt hash: ${resolved_hash:0:20}..."
+    ok "compose resolves a real-looking (escaped) bcrypt hash: ${resolved_hash:0:24}..."
 else
-    bad "compose config does not show a valid bcrypt hash for BASIC_AUTH_HASH - it got mangled. Check for a leaked env-var-like fragment (e.g. \$KUNzNk) in caddy container warnings."
+    bad "compose config does not show a valid escaped bcrypt hash for BASIC_AUTH_HASH - it got mangled. Check for a leaked env-var-like fragment (e.g. \$KUNzNk) in caddy container warnings."
 fi
 
 # ---------------------------------------------------------------------------
